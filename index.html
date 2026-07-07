@@ -443,11 +443,22 @@ function update(dt){
     const dx = p.x - e.x;
     const dir = Math.sign(dx)||1;
     if(e.fly){
-      const ty = (e.type==='bat')
-        ? p.y-44 + Math.sin(e.t*4+e.phase)*40
-        : p.y-34 + Math.sin(e.t*2+e.phase)*22;
-      e.x += dir*e.spd*dt;
-      e.y += clamp(ty-e.y, -130*dt, 130*dt);
+      if(e.type==='bat'){
+        // 蝙蝠:靈活俯衝,快速跟上玩家高度
+        const ty = p.y-44 + Math.sin(e.t*4+e.phase)*40;
+        e.x += dir*e.spd*dt;
+        e.y += clamp(ty-e.y, -130*dt, 130*dt);
+      } else {
+        // 幽靈 / 死神:朝玩家緩慢直線飄近,垂直移動很慢
+        // 玩家跳躍時不會跟著上下彈跳,只會慢慢修正高度
+        const tx = p.x, ty2 = p.y-34;
+        const ddx = tx-e.x, ddy = ty2-e.y;
+        const dist = Math.hypot(ddx,ddy)||1;
+        const vmax = e.boss ? 42 : 34;             // 垂直速度上限 (px/s)
+        e.x += (ddx/dist)*e.spd*dt;
+        e.y += clamp((ddy/dist)*e.spd, -vmax, vmax)*dt
+             + Math.sin(e.t*1.6+e.phase)*8*dt;     // 輕微飄浮感
+      }
       e.y = clamp(e.y, 60, GROUND_Y-10);
     } else {
       e.x += dir*e.spd*dt;
