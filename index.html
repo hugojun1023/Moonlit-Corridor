@@ -147,18 +147,48 @@ function show(id,on){ document.getElementById(id).classList.toggle('show',on); }
 /* ---------- 遊戲狀態 ---------- */
 let state='title', paused=false;
 let player;
-let enemies=[], bullets=[], gems=[], pickups=[], particles=[], dmgTexts=[], flames=[];
+let enemies=[], bullets=[], gems=[], pickups=[], particles=[], dmgTexts=[], flames=[], banners=[];
 let camX=0, time=0, kills=0, shake=0, spawnT=0, bossT=60, frame=0;
+let combo=0, comboT=0, comboPop=0, gold=0, gemStreak=0, gemT=0, swarmT=22;
+
+/* ---------- 音效:WebAudio 迷你合成器 ---------- */
+let AC=null;
+function initAudio(){ if(!AC){ try{ AC = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } }
+function sfx(f0, f1, dur, type='square', vol=0.12){
+  if(!AC) return;
+  try{
+    const t = AC.currentTime;
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(30,f1), t+dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t+dur);
+    o.connect(g); g.connect(AC.destination);
+    o.start(t); o.stop(t+dur+0.02);
+  }catch(e){}
+}
+function sfxLevelUp(){
+  [523,659,784,1047].forEach((f,i)=>setTimeout(()=>sfx(f,f,0.14,'square',0.14), i*90));
+}
+function sfxChest(){
+  [392,523,659,784,1047,1319].forEach((f,i)=>setTimeout(()=>sfx(f,f,0.12,'triangle',0.15), i*70));
+}
+function addBanner(text, color='#ffd75e', size=30){
+  banners.push({text, color, size, t:0, life:1.6});
+}
 
 function startGame(){
   state='play'; paused=false;
+  initAudio();
   show('titleScreen',false); show('gameOver',false); show('levelUp',false);
   time=0; kills=0; camX=0; spawnT=0; bossT=90; shake=0;
-  enemies=[]; bullets=[]; gems=[]; pickups=[]; particles=[]; dmgTexts=[]; flames=[];
+  combo=0; comboT=0; comboPop=0; gold=0; gemStreak=0; gemT=0; swarmT=22;
+  enemies=[]; bullets=[]; gems=[]; pickups=[]; particles=[]; dmgTexts=[]; flames=[]; banners=[];
   player = {
     x:0, y:GROUND_Y, vx:0, vy:0, onGround:true, facing:1, dropT:0,
     hpMax:100, hp:100, speed:230, jumpV:625,
-    lv:1, xp:0, xpNeed:6,
+    lv:1, xp:0, xpNeed:5,
     inv:0, animT:0, moving:false,
     weapons:[ makeWeapon('whip') ],
     stats:{ dmg:1, cdr:1, area:1, magnet:110, regen:0 },
@@ -278,10 +308,10 @@ function spawnEnemy(type){
 function pickEnemyType(){
   const t = time;
   const pool = [];
-  pool.push(['bat', 10]);
-  if(t>25) pool.push(['skel', 8]);
-  if(t>60) pool.push(['ghost', 6]);
-  if(t>120) pool.push(['armor', 4]);
+  pool.push(['bat', 14]);
+  if(t>25) pool.push(['skel', 7]);
+  if(t>60) pool.push(['ghost', 5]);
+  if(t>130) pool.push(['armor', 4]);
   let sum=0; pool.forEach(p=>sum+=p[1]);
   let r = Math.random()*sum;
   for(const [k,wt] of pool){ r-=wt; if(r<=0) return k; }
@@ -428,14 +458,28 @@ function update(dt){
 
   /* --- 生成敵人 --- */
   spawnT -= dt;
-  const interval = clamp(2.3 - time*0.010, 0.32, 2.3);
+  const interval = clamp(1.4 - time*0.009, 0.30, 1.4);
   if(spawnT<=0){
     spawnT = interval;
-    const n = 1 + Math.floor(time/80);
+    const n = 2 + Math.floor(time/70);
     for(let i=0;i<n;i++) spawnEnemy(pickEnemyType());
   }
+  // 怪物潮:每 30 秒湧入一波脆皮蝙蝠,是快速升級的經驗值盛宴
+  swarmT -= dt;
+  if(swarmT<=0){
+    swarmT = 30;
+    const count = 10 + Math.floor(time/45);
+    for(let i=0;i<count;i++){
+      spawnEnemy('bat');
+      const e = enemies[enemies.length-1];
+      e.hp *= 0.65; e.hpMax = e.hp;              // 潮水蝙蝠更脆
+      e.x += rand(-140,140);
+    }
+    addBanner('🦇 怪 物 潮 來 襲 !', '#c9a0ff', 34);
+    sfx(180, 60, 0.5, 'sawtooth', 0.1);
+  }
   bossT -= dt;
-  if(bossT<=0){ bossT = 80; spawnEnemy('reaper'); }
+  if(bossT<=0){ bossT = 80; spawnEnemy('reaper'); addBanner('☠ 死 神 降 臨', '#ff4455', 36); sfx(120,40,0.8,'sawtooth',0.12); }
 
   /* --- 敵人 AI --- */
   for(const e of enemies){
@@ -472,6 +516,7 @@ function update(dt){
         p.hp -= e.dmg;
         p.inv = 0.9;
         shake = 8;
+        sfx(200,60,0.25,'sawtooth',0.14);
         addDmg(p.x, p.y-PLAYER_H-10, e.dmg, '#ff5566');
         if(p.hp<=0){ gameOver(); return; }
       }
@@ -549,24 +594,59 @@ function update(dt){
   for(const e of enemies){
     if(e.hp<=0 && !e.dead){
       e.dead=true; kills++;
-      for(let i=0;i<10;i++) particles.push({x:e.x,y:(e.fly?e.y:e.y-e.size/2),vx:rand(-140,140),vy:rand(-220,40),t:0,life:rand(.3,.7),c:ENEMY_DEFS[e.type].color});
+      // 連擊!
+      combo++; comboT = 2.2; comboPop = 0.25;
+      if(combo===10||combo===25||combo===50||combo===100||combo===200){
+        addBanner(combo+' COMBO! 連擊爆發', '#ffd75e', 32);
+        sfx(880, 1320, 0.2, 'square', 0.12);
+        player.xp += Math.floor(combo/5);            // 連擊里程碑直接送經驗
+      }
+      sfx(300, 70, 0.12, 'triangle', 0.09);
+      for(let i=0;i<12;i++) particles.push({x:e.x,y:(e.fly?e.y:e.y-e.size/2),vx:rand(-160,160),vy:rand(-240,40),t:0,life:rand(.3,.7),c:ENEMY_DEFS[e.type].color});
       gems.push({x:e.x, y:e.fly?e.y:e.y-14, v:e.xp, t:0});
-      if(Math.random()<0.04) pickups.push({x:e.x, y:GROUND_Y-14, kind:'heart'});
-      if(e.boss){ shake=14; for(let i=0;i<3;i++) gems.push({x:e.x+rand(-30,30), y:e.y, v:10, t:0}); }
+      if(Math.random()<0.30) gems.push({x:e.x+rand(-14,14), y:(e.fly?e.y:e.y-14)-8, coin:true, v:irand(1,3), t:0});
+      if(Math.random()<0.035) pickups.push({x:e.x, y:GROUND_Y-14, kind:'heart'});
+      if(Math.random()<0.015) pickups.push({x:e.x, y:GROUND_Y-14, kind:'magnet'});
+      if(e.boss){
+        shake=14;
+        pickups.push({x:e.x, y:GROUND_Y-16, kind:'chest'});
+        for(let i=0;i<3;i++) gems.push({x:e.x+rand(-30,30), y:e.y, v:10, t:0});
+        addBanner('☠ 死神已被擊敗!', '#ffd75e', 34);
+      }
     }
   }
   enemies = enemies.filter(e=>!e.dead);
 
   /* --- 寶石 / 道具 --- */
+  gemT = Math.max(0, gemT-dt);
   for(const g of gems){
     g.t+=dt;
     const dx=p.x-g.x, dy=(p.y-30)-g.y, dist=Math.hypot(dx,dy);
-    if(dist < p.stats.magnet){ g.x += dx/dist*420*dt; g.y += dy/dist*420*dt; }
+    const pull = g.mag ? 800 : (dist < p.stats.magnet ? 420 : 0);
+    if(pull){ g.x += dx/dist*pull*dt; g.y += dy/dist*pull*dt; }
     if(dist<26){
-      g.got=true; p.xp += g.v;
+      g.got=true;
+      if(g.coin){
+        gold += g.v;
+        sfx(1000, 1500, 0.09, 'square', 0.1);
+        addDmg(g.x, g.y-14, '+'+g.v+'💰', '#ffd75e');
+      } else {
+        // 連續吸寶石 → 音高一路飆升,多巴胺核心
+        gemStreak = gemT>0 ? Math.min(gemStreak+1, 24) : 0;
+        gemT = 0.5;
+        sfx(500*(1+gemStreak*0.09), 700*(1+gemStreak*0.09), 0.07, 'sine', 0.09);
+        p.xp += g.v;
+      }
       if(p.xp>=p.xpNeed){
         p.xp-=p.xpNeed; p.lv++;
-        p.xpNeed = Math.floor(5 + p.lv*7 + p.lv*p.lv*0.6);
+        p.xpNeed = Math.floor(4 + p.lv*5 + p.lv*p.lv*0.45);
+        // 升級金色爆發
+        for(let i=0;i<26;i++){
+          const a = i/26*Math.PI*2;
+          particles.push({x:p.x, y:p.y-30, vx:Math.cos(a)*rand(120,260), vy:Math.sin(a)*rand(120,260)-80, t:0, life:rand(.4,.8), c:'#ffd75e'});
+        }
+        addBanner('✦ LEVEL UP ✦', '#ffd75e', 36);
+        sfxLevelUp();
         openLevelUp();
       }
     }
@@ -575,10 +655,29 @@ function update(dt){
   for(const it of pickups){
     if(Math.abs(it.x-p.x)<30 && Math.abs(it.y-(p.y-30))<60){
       it.got=true;
-      if(it.kind==='heart'){ p.hp=Math.min(p.hpMax,p.hp+25); addDmg(p.x,p.y-PLAYER_H-14,'+25','#5f5'); }
+      if(it.kind==='heart'){ p.hp=Math.min(p.hpMax,p.hp+25); addDmg(p.x,p.y-PLAYER_H-14,'+25','#5f5'); sfx(600,900,0.15,'sine',0.12); }
+      else if(it.kind==='magnet'){
+        for(const g of gems) g.mag=true;
+        addBanner('🧲 全場吸取!', '#7fd0ff', 30);
+        sfx(300, 1200, 0.35, 'sine', 0.12);
+      }
+      else if(it.kind==='chest'){
+        p.hp = Math.min(p.hpMax, p.hp+30);
+        for(let i=0;i<12;i++) gems.push({x:it.x+rand(-20,20), y:it.y-rand(10,80), v:irand(2,4), t:0, mag:true});
+        for(let i=0;i<5;i++)  gems.push({x:it.x+rand(-20,20), y:it.y-rand(10,80), coin:true, v:irand(2,5), t:0, mag:true});
+        addBanner('👑 寶 藏 !', '#ffd75e', 38);
+        sfxChest();
+        shake = 6;
+      }
     }
   }
   pickups = pickups.filter(it=>!it.got);
+
+  /* --- 連擊 / 橫幅計時 --- */
+  comboT -= dt; if(comboT<=0) combo=0;
+  comboPop = Math.max(0, comboPop-dt);
+  for(const b of banners) b.t += dt;
+  banners = banners.filter(b=>b.t<b.life);
 
   /* --- 粒子 / 傷害數字 --- */
   for(const q of particles){ q.t+=dt; q.x+=q.vx*dt; q.y+=q.vy*dt; q.vy+=800*dt; }
@@ -590,8 +689,17 @@ function update(dt){
 }
 
 function damageEnemy(e, dmg){
+  const crit = Math.random() < 0.15;
+  if(crit) dmg *= 2;
   e.hp -= dmg; e.flash = 0.12;
-  addDmg(e.x, (e.fly?e.y:e.y-e.size)-14, Math.round(dmg), '#ffd75e');
+  const ey = (e.fly?e.y:e.y-e.size)-14;
+  if(crit){
+    dmgTexts.push({x:e.x, y:ey, v:Math.round(dmg)+'!', c:'#ff7433', t:0, big:true});
+    sfx(700, 200, 0.1, 'square', 0.1);
+  } else {
+    addDmg(e.x, ey, Math.round(dmg), '#ffd75e');
+    sfx(420, 180, 0.06, 'square', 0.05);
+  }
 }
 function addDmg(x,y,v,c){ dmgTexts.push({x,y,v,c,t:0}); }
 function gameOver(){
@@ -1009,8 +1117,19 @@ function drawFlames(){
 function drawGems(){
   for(const g of gems){
     const x=worldX(g.x);
-    const big = g.v>=6;
     const bob = Math.sin(frame*0.1+g.x)*3;
+    if(g.coin){
+      // 金幣:旋轉閃光
+      const sq = Math.abs(Math.sin(frame*0.08+g.x*0.1));
+      ctx.save(); ctx.translate(x, g.y+bob);
+      ctx.fillStyle='#ffd75e'; ctx.shadowColor='#ffd75e'; ctx.shadowBlur=8;
+      ctx.beginPath(); ctx.ellipse(0,0, 6*Math.max(0.25,sq), 6, 0, 0, 7); ctx.fill();
+      ctx.fillStyle='#b8860b';
+      ctx.beginPath(); ctx.ellipse(0,0, 3.4*Math.max(0.25,sq), 3.4, 0, 0, 7); ctx.fill();
+      ctx.restore(); ctx.shadowBlur=0;
+      continue;
+    }
+    const big = g.v>=6;
     ctx.save(); ctx.translate(x, g.y+bob);
     ctx.rotate(Math.PI/4);
     const s = big?9:6;
@@ -1019,17 +1138,37 @@ function drawGems(){
     ctx.fillRect(-s/2,-s/2,s,s);
     ctx.restore();
   }
+  ctx.shadowBlur=0;
 }
 function drawPickups(){
   for(const it of pickups){
     const x=worldX(it.x);
     const bob=Math.sin(frame*0.1)*3;
-    ctx.fillStyle='#e33'; ctx.shadowColor='#e33'; ctx.shadowBlur=12;
     const y=it.y+bob;
-    ctx.beginPath();
-    ctx.arc(x-5,y-3,6,0,7); ctx.arc(x+5,y-3,6,0,7);
-    ctx.moveTo(x-10,y); ctx.lineTo(x,y+12); ctx.lineTo(x+10,y);
-    ctx.fill(); ctx.shadowBlur=0;
+    if(it.kind==='heart'){
+      ctx.fillStyle='#e33'; ctx.shadowColor='#e33'; ctx.shadowBlur=12;
+      ctx.beginPath();
+      ctx.arc(x-5,y-3,6,0,7); ctx.arc(x+5,y-3,6,0,7);
+      ctx.moveTo(x-10,y); ctx.lineTo(x,y+12); ctx.lineTo(x+10,y);
+      ctx.fill();
+    } else if(it.kind==='magnet'){
+      ctx.strokeStyle='#7fd0ff'; ctx.shadowColor='#7fd0ff'; ctx.shadowBlur=12;
+      ctx.lineWidth=5;
+      ctx.beginPath(); ctx.arc(x, y, 9, Math.PI*0.15, Math.PI*0.85, true); ctx.stroke();
+      ctx.fillStyle='#e8e0cc';
+      ctx.fillRect(x-11.5, y+2, 5, 6); ctx.fillRect(x+6.5, y+2, 5, 6);
+    } else if(it.kind==='chest'){
+      const glow = 10+Math.sin(frame*0.15)*5;
+      ctx.shadowColor='#ffd75e'; ctx.shadowBlur=glow;
+      ctx.fillStyle='#7a4a1e';
+      ctx.fillRect(x-14, it.y-10, 28, 18);
+      ctx.fillStyle='#a4691e';
+      ctx.fillRect(x-14, it.y-14, 28, 8);
+      ctx.fillStyle='#ffd75e';
+      ctx.fillRect(x-3, it.y-8, 6, 8);
+      ctx.fillRect(x-14, it.y-7, 28, 2);
+    }
+    ctx.shadowBlur=0;
   }
 }
 function drawParticles(){
@@ -1041,8 +1180,10 @@ function drawParticles(){
   ctx.globalAlpha=1;
 }
 function drawDmgTexts(){
-  ctx.font='bold 15px monospace'; ctx.textAlign='center';
+  ctx.textAlign='center';
   for(const d of dmgTexts){
+    const pop = d.big ? (d.t<0.12? 1+(0.12-d.t)*6 : 1) : 1;
+    ctx.font = 'bold '+Math.round((d.big?20:15)*pop)+'px monospace';
     ctx.globalAlpha = 1-d.t/0.8;
     ctx.fillStyle='#000'; ctx.fillText(d.v, worldX(d.x)+1, d.y+1);
     ctx.fillStyle=d.c; ctx.fillText(d.v, worldX(d.x), d.y);
@@ -1075,9 +1216,36 @@ function drawHUD(){
   ctx.fillStyle='#000'; ctx.fillText(`${m}:${String(s).padStart(2,'0')}`, W/2+1, 37);
   ctx.fillStyle='#e8e0cc'; ctx.fillText(`${m}:${String(s).padStart(2,'0')}`, W/2, 36);
 
-  // 擊殺數
+  // 擊殺數與金幣
   ctx.font='14px monospace'; ctx.textAlign='right';
   ctx.fillStyle='#d9a441'; ctx.fillText('☠ '+kills, W-20, 32);
+  ctx.fillStyle='#ffd75e'; ctx.fillText('💰 '+gold, W-20, 52);
+
+  // 連擊(越高越大越紅)
+  if(combo>=5){
+    const pop = 1 + comboPop*2.4;
+    const heat = clamp(combo/60, 0, 1);
+    ctx.font = 'bold '+Math.round((20+heat*14)*pop)+'px monospace';
+    ctx.textAlign='right';
+    const r = Math.round(255), g2 = Math.round(215-heat*140), b2 = Math.round(94-heat*60);
+    ctx.fillStyle='#000'; ctx.fillText(combo+' COMBO', W-19, 86+1);
+    ctx.fillStyle=`rgb(${r},${g2},${b2})`; ctx.fillText(combo+' COMBO', W-20, 86);
+    // 連擊倒數細條
+    ctx.fillStyle='rgba(255,215,94,.5)';
+    ctx.fillRect(W-120, 94, 100*clamp(comboT/2.2,0,1), 3);
+  }
+
+  // 中央橫幅
+  ctx.textAlign='center';
+  for(const b of banners){
+    const fade = b.t<0.15 ? b.t/0.15 : (b.life-b.t)<0.4 ? (b.life-b.t)/0.4 : 1;
+    const pop = b.t<0.15 ? 1+(0.15-b.t)*3 : 1;
+    ctx.globalAlpha = fade;
+    ctx.font = 'bold '+Math.round(b.size*pop)+'px "Noto Serif TC", serif';
+    ctx.fillStyle='#000'; ctx.fillText(b.text, W/2+2, H*0.30+2);
+    ctx.fillStyle=b.color; ctx.fillText(b.text, W/2, H*0.30);
+  }
+  ctx.globalAlpha=1;
 
   // 武器欄
   ctx.textAlign='left'; ctx.font='16px serif';
